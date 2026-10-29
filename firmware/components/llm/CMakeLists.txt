@@ -1,7 +1,7 @@
 # On-device inference engine — shared verbatim with the PC sim via ../../../common/llm
 set(LLM ${CMAKE_CURRENT_LIST_DIR}/../../../common/llm)
 idf_component_register(
-    SRCS "${LLM}/q4_model.c" "${LLM}/word_tok.c" "${LLM}/advisor_core.c"
+    SRCS "${LLM}/q4_model.c" "${LLM}/word_tok.c" "${LLM}/advisor_core.c" "${LLM}/tiny_brain.c"
     INCLUDE_DIRS "${LLM}"
     REQUIRES esp_timer tankcore
 )

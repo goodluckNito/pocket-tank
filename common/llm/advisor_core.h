@@ -13,11 +13,14 @@
 #include <stddef.h>
 
 /* open model + tokenizer; alloc is the run-state allocator (PSRAM on device).
- * Detects the schema from the tokenizer (a " trust" token = v3). */
+ * Detects the schema from the tokenizer (a " trust" token = v3). A model blob
+ * that starts with "TBRN" is a tinybrain (common/llm/tiny_brain.h): schema v4,
+ * no tokenizer needed (tok_bin may be NULL), advisor_core_model/config NULL. */
 bool advisor_core_init(const uint8_t *model_bin, size_t model_len,
                        const uint8_t *tok_bin, size_t tok_len,
                        void *(*alloc)(size_t), uint32_t seed);
-int  advisor_core_schema(void);                 /* 2 or 3; 0 if not loaded */
+int  advisor_core_schema(void);                 /* 2, 3 or 4; 0 if not loaded */
+bool advisor_core_tiny(void);                   /* the loaded model is a tinybrain */
 const q4_config_t *advisor_core_config(void);
 q4_model_t *advisor_core_model(void);           /* for q4_model_bench */
 

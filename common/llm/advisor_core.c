@@ -1,11 +1,14 @@
 /* advisor_core.c — see advisor_core.h. */
 #include "advisor_core.h"
 #include "word_tok.h"
+#include "tiny_brain.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 
 static q4_model_t *g_model;
+static tb_model_t  g_tb;              /* the tinybrain engine (docs/tinybrain.md) */
+static bool        g_tiny;            /* the model blob was a tinybrain file */
 static word_tok_t  g_tok;
 static int   g_schema;                /* 2 | 3 | 4 */
 static int   g_goal_ids[GOAL_COUNT];  /* token id of each goal word */
@@ -104,6 +107,13 @@ void advisor_core_encode(const tank_t *t, int idx, char *out, size_t n) {
 bool advisor_core_init(const uint8_t *model_bin, size_t model_len,
                        const uint8_t *tok_bin, size_t tok_len,
                        void *(*alloc)(size_t), uint32_t seed) {
+    g_tiny = false; g_model = NULL;
+    if (tb_is_tinybrain(model_bin, model_len)) {   /* reads the v4 line; no tokenizer */
+        if (!tb_open(&g_tb, model_bin, model_len)) return false;
+        g_tiny = true; g_schema = 4;
+        if (seed) g_rng = seed;
+        return true;
+    }
     g_model = q4_model_open(model_bin, model_len, alloc);
     if (!g_model) return false;
     if (word_tok_init(&g_tok, tok_bin, tok_len, q4_model_config(g_model)->vocab_size) != 0) return false;
@@ -120,14 +130,41 @@ bool advisor_core_init(const uint8_t *model_bin, size_t model_len,
     if (seed) g_rng = seed;
     return true;
 }
-int advisor_core_schema(void) { return g_model ? g_schema : 0; }
+int advisor_core_schema(void) { return g_model || g_tiny ? g_schema : 0; }
+bool advisor_core_tiny(void) { return g_tiny; }
 q4_model_t *advisor_core_model(void) { return g_model; }
 const q4_config_t *advisor_core_config(void) { return g_model ? q4_model_config(g_model) : NULL; }
 const float *advisor_core_last_probs(void) { return g_last_p; }
 bool advisor_core_damaged(void) { return g_damaged; }
 
+static uint32_t xorshift(void) { uint32_t x = g_rng; x ^= x << 13; x ^= x >> 17; x ^= x << 5; return g_rng = x; }
+
+/* the tinybrain path: the same distribution layer over the MLP's goal head
+ * (sampled at advisor_core_temp, as q4_model_decide does), urgency greedy */
+static goal_t infer_tiny(const char *state, goal_t g) {
+    float x[TB_N_FEAT], lg[TB_N_GOAL], lu[TB_N_URG];
+    if (!tb_features(state, x)) return g;
+    tb_forward(&g_tb, x, lg, lu);
+    float temp = advisor_core_sample ? advisor_core_temp : 0, inv = temp > 0 ? 1.0f / temp : 1.0f, mx = -1e30f, sum = 0;
+    for (int i = 0; i < GOAL_COUNT; i++) if (lg[i] * inv > mx) mx = lg[i] * inv;
+    for (int i = 0; i < GOAL_COUNT; i++) { g_last_p[i] = expf(lg[i] * inv - mx); sum += g_last_p[i]; }
+    for (int i = 0; i < GOAL_COUNT; i++) g_last_p[i] /= sum;
+    for (int i = 0; i < GOAL_COUNT; i++) if (not_a_number(g_last_p[i])) { g_damaged = true; return g; }
+    int pick = 0;
+    if (temp > 0) {
+        float r = (float)(xorshift() & 0xffffff) / 16777216.0f, acc = 0;
+        for (int i = 0; i < GOAL_COUNT; i++) { acc += g_last_p[i]; pick = i; if (r < acc) break; }
+    } else for (int i = 1; i < GOAL_COUNT; i++) if (g_last_p[i] > g_last_p[pick]) pick = i;
+    int u = 0; for (int i = 1; i < TB_N_URG; i++) if (lu[i] > lu[u]) u = i;
+    int ru = -1;
+    for (int i = 0; i < GOAL_COUNT; i++) if (i != pick && (ru < 0 || g_last_p[i] > g_last_p[ru])) ru = i;
+    g.id = (goal_id_t)pick; g.urgency = (float)u; g.confidence = g_last_p[pick]; g.runner_up = (goal_id_t)ru;
+    return g;
+}
+
 goal_t advisor_core_infer(const char *state, int *tokens_out) {
     goal_t g = { GOAL_COUNT, 5, 1.0f, GOAL_COUNT };   /* GOAL_COUNT = "no change" */
+    if (g_tiny) { if (tokens_out) *tokens_out = 0; return infer_tiny(state, g); }
     if (!g_model) return g;
     char prompt[400];
     snprintf(prompt, sizeof prompt, "%s ->", state);

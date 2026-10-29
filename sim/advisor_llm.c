@@ -13,6 +13,7 @@
  *
  * Encoding + inference live in common/llm/advisor_core.c — the exact engine,
  * model file and state line that ship on the device. */
+#define _POSIX_C_SOURCE 200809L          /* nanosleep (POCKET_ADVISOR_MS) */
 #include "advisor.h"
 #include "advisor_core.h"
 #include <pthread.h>
@@ -20,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 static bool        g_loaded = false;
 static uint8_t    *g_model_bytes = NULL;
@@ -38,6 +40,10 @@ static int    g_next = 0;             /* rotation pointer over pending fish */
  * shifts the slots, and a decision asked for the old ones is dropped */
 static uint8_t g_gen, g_req_gen, g_resp_gen;
 bool advisor_llm_narrate = false;     /* --narrate: stream states + decisions */
+/* POCKET_ADVISOR_MS=2500: every decision takes at least this long, as on the
+ * device (docs/stats.md: ~2.2-3.7 s for the transformer) - the honest way to
+ * compare brains in a real-time --selftest-llm N run on a fast PC */
+static long g_min_ms;
 
 static void *worker(void *arg) {
     (void)arg;
@@ -52,6 +58,10 @@ static void *worker(void *arg) {
         pthread_mutex_unlock(&g_mx);
 
         goal_t g = advisor_core_infer(state, NULL);
+        if (g_min_ms > 0) {
+            struct timespec ts = { g_min_ms / 1000, (g_min_ms % 1000) * 1000000L };
+            nanosleep(&ts, NULL);
+        }
 
         pthread_mutex_lock(&g_mx);
         g_resp_goal = g;
@@ -72,6 +82,9 @@ static void *host_alloc(size_t n) { return calloc(1, n); }
 
 bool advisor_llm_init(const char *model_path, const char *tok_path) {
     size_t ml, tl;
+    /* POCKET_BRAIN=../model/out/tinybrain.bin: the small distilled network
+     * instead of the transformer (docs/tinybrain.md); same interface */
+    if (getenv("POCKET_BRAIN")) model_path = getenv("POCKET_BRAIN");
     g_model_bytes = slurp(model_path, &ml);
     uint8_t *tb = slurp(tok_path, &tl);
     if (!g_model_bytes || !tb) return false;
@@ -79,11 +92,12 @@ bool advisor_llm_init(const char *model_path, const char *tok_path) {
         fprintf(stderr, "advisor: bad model/tokenizer (%s)\n", model_path); return false;
     }
     free(tb);
+    if (getenv("POCKET_ADVISOR_MS")) g_min_ms = atol(getenv("POCKET_ADVISOR_MS"));
     pthread_t th;
     pthread_create(&th, NULL, worker, NULL);
     g_loaded = true;
-    printf("advisor: schema v%d, %s decoding\n", advisor_core_schema(),
-           advisor_core_sample ? "sampled" : "greedy");
+    printf("advisor: schema v%d, %s decoding%s\n", advisor_core_schema(),
+           advisor_core_sample ? "sampled" : "greedy", advisor_core_tiny() ? ", tinybrain" : "");
     return true;
 }
 

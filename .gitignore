@@ -39,3 +39,7 @@ tools/boards.local.sh
 sim/build-square/
 sim/fishsim-square
 sim/build-arm*/
+
+# tinybrain (docs/tinybrain.md): host tools built from model/tinybrain/*.c
+model/tinybrain/label_q4
+model/tinybrain/tb_check
